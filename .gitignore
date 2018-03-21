@@ -1,0 +1,10 @@
+models/
+preprocessed/
+raw/
+*.pyc
+vocab.search
+local
+.idea/
+add_copyright.py
+copyright
+.DS_Store

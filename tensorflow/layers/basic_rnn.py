@@ -36,6 +36,7 @@ def rnn(rnn_type, inputs, length, hidden_size, layer_num=1, dropout_keep_prob=No
                 concatenated if this is True, else we add them.
     Returns:
         RNN outputs and final state
+    reviewed
     """
     if not rnn_type.startswith('bi'):     # it is not bidirectional rnn
         cell = get_cell(rnn_type, hidden_size, layer_num, dropout_keep_prob)
@@ -73,6 +74,7 @@ def get_cell(rnn_type, hidden_size, layer_num=1, dropout_keep_prob=None):
         dropout_keep_prob: dropout in RNN
     Returns:
         An RNN Cell
+    reviewed
     """
     if rnn_type.endswith('lstm'):
         cell = tc.rnn.LSTMCell(num_units=hidden_size, state_is_tuple=True)

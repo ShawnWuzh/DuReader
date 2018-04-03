@@ -154,6 +154,7 @@ class Vocab(object):
         Args:
             embedding_path: the path of the pretrained embedding file
         """
+        # reviewed
         trained_embeddings = {}
         with open(embedding_path, 'r') as fin:
             for line in fin:

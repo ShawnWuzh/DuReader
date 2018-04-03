@@ -95,6 +95,7 @@ class RCModel(object):
 
     def _setup_placeholders(self):
         """
+        reviewed
         Placeholders
         """
         self.p = tf.placeholder(tf.int32, [None, None])
@@ -102,12 +103,14 @@ class RCModel(object):
         self.p_length = tf.placeholder(tf.int32, [None])
         self.q_length = tf.placeholder(tf.int32, [None])
         self.start_label = tf.placeholder(tf.int32, [None])
+        self.match_passage = tf.placeholder(tf.int32, [None])
         self.end_label = tf.placeholder(tf.int32, [None])
         self.dropout_keep_prob = tf.placeholder(tf.float32)
 
     def _embed(self):
         """
         The embedding layer, question and passage share embeddings
+        reviewed
         """
         with tf.device('/cpu:0'), tf.variable_scope('word_embedding'):
             self.word_embeddings = tf.get_variable(
@@ -117,11 +120,13 @@ class RCModel(object):
                 trainable=True
             )
             self.p_emb = tf.nn.embedding_lookup(self.word_embeddings, self.p)
+            # self.p : [[ids],[ids],[ids],.........]
             self.q_emb = tf.nn.embedding_lookup(self.word_embeddings, self.q)
 
     def _encode(self):
         """
         Employs two Bi-LSTMs to encode passage and question separately
+        reviewed
         """
         with tf.variable_scope('passage_encoding'):
             self.sep_p_encodes, _ = rnn('bi-lstm', self.p_emb, self.p_length, self.hidden_size)
@@ -134,6 +139,7 @@ class RCModel(object):
     def _match(self):
         """
         The core of RC model, get the question-aware passage encoding with either BIDAF or MLSTM
+        reviewed
         """
         if self.algo == 'MLSTM':
             match_layer = MatchLSTMLayer(self.hidden_size)
@@ -169,13 +175,42 @@ class RCModel(object):
                 self.fuse_p_encodes,
                 [batch_size, -1, 2 * self.hidden_size]
             )
+            passage_encodes = tf.reshape(
+                self.fuse_p_encodes,
+                [batch_size, -1, tf.shape(self.sep_p_encodes)[1], 2 * self.hidden_size]
+            )
             no_dup_question_encodes = tf.reshape(
                 self.sep_q_encodes,
                 [batch_size, -1, tf.shape(self.sep_q_encodes)[1], 2 * self.hidden_size]
             )[0:, 0, 0:, 0:]
         decoder = PointerNetDecoder(self.hidden_size)
-        self.start_probs, self.end_probs = decoder.decode(concat_passage_encodes,
-                                                          no_dup_question_encodes)
+        self.start_probs, self.end_probs,self.passage_ranking_scores = decoder.decode(concat_passage_encodes,
+                                                        passage_encodes,
+                                                          no_dup_question_encodes,batch_size)
+        # concat_passage_encodes of shape (batch_size,all_passage_length,2 * self.hidden_size)
+        # no_dup_question_encodes of shape (batch_size,question_length, 2 * hidden_size)
+    #The Following code is added for passage ranking and joint learning
+    #@written by Zongheng WU
+    #@copyright
+
+        
+    # def _passage_ranking(self):
+    #     batch_size = tf.shape(self.match_passage)[0]
+    #     passage_encodes = tf.reshape(
+    #         self.fuse_p_encodes,
+    #         [batch_size, -1, tf.shape(self.sep_p_encodes)[1],2 * self.hidden_size]
+    #     )
+    #     question_encodes = tf.reshape(
+    #         self.sep_q_encodes,
+    #         [batch_size, -1, tf.shape(self.sep_q_encodes)[1], 2 * self.hidden_size]
+    #     )
+    #     self.passage_ranking_scores = passage_attention_to_question(question_encodes,passage_encodes,self.hidden_size)
+    #     # seq_q_encodes of shape(number_of_questions, question_length,2*hidden_size)
+    #     # fuse_p_encodes of shape(number_of_passages,passage_length,2*hidden_size)
+
+
+
+    #The code Zongheng WU write ends here
 
     def _compute_loss(self):
         """
@@ -190,11 +225,18 @@ class RCModel(object):
                 labels = tf.one_hot(labels, tf.shape(probs)[1], axis=1)
                 losses = - tf.reduce_sum(labels * tf.log(probs + epsilon), 1)
             return losses
+        def sparse_para_ranking_loss(match_passages,ranking_scores,epsilon=1e-9, scope=None):
+            with tf.name_scope(scope, "log_loss"):
+                rank_lables = tf.one_hot(match_passages, tf.shape(ranking_scores)[1], axis=1)    # shape(32,5)
+                rank_losses = - tf.reduce_sum(rank_lables * tf.log(tf.squeeze(ranking_scores) + epsilon), 1)  # ranking_scores (32,5,1)
+            return rank_losses
 
         self.start_loss = sparse_nll_loss(probs=self.start_probs, labels=self.start_label)
         self.end_loss = sparse_nll_loss(probs=self.end_probs, labels=self.end_label)
         self.all_params = tf.trainable_variables()
-        self.loss = tf.reduce_mean(tf.add(self.start_loss, self.end_loss))
+        self.loss = tf.reduce_mean(tf.add(self.start_loss, self.end_loss)) * 0.8
+        self.loss += 0.2 * tf.reduce_mean(sparse_para_ranking_loss(self.match_passage,self.passage_ranking_scores))
+        # self.match_passge shape (batch_size,)
         if self.weight_decay > 0:
             with tf.variable_scope('l2_loss'):
                 l2_loss = tf.add_n([tf.nn.l2_loss(v) for v in self.all_params])
@@ -232,7 +274,8 @@ class RCModel(object):
                          self.q_length: batch['question_length'],
                          self.start_label: batch['start_id'],
                          self.end_label: batch['end_id'],
-                         self.dropout_keep_prob: dropout_keep_prob}
+                         self.dropout_keep_prob: dropout_keep_prob,
+                         self.match_passage:batch['answer_passage']}
             _, loss = self.sess.run([self.train_op, self.loss], feed_dict)
             total_loss += loss * len(batch['raw_data'])
             total_num += len(batch['raw_data'])
@@ -300,6 +343,7 @@ class RCModel(object):
                          self.q_length: batch['question_length'],
                          self.start_label: batch['start_id'],
                          self.end_label: batch['end_id'],
+                         self.match_passage: batch['answer_passage'],
                          self.dropout_keep_prob: 1.0}
             start_probs, end_probs, loss = self.sess.run([self.start_probs,
                                                           self.end_probs, self.loss], feed_dict)
@@ -365,7 +409,7 @@ class RCModel(object):
             if p_idx >= self.max_p_num:
                 continue
             passage_len = min(self.max_p_len, len(passage['passage_tokens']))
-            answer_span, score = self.find_best_answer_for_passage(
+            answer_span, score = self.find_best_answer_for_passage(passage,
                 start_prob[p_idx * padded_p_len: (p_idx + 1) * padded_p_len],
                 end_prob[p_idx * padded_p_len: (p_idx + 1) * padded_p_len],
                 passage_len)
@@ -391,17 +435,22 @@ class RCModel(object):
 
 
 
-    def find_best_answer_for_passage(self, start_probs, end_probs, passage_len=None):
+    def find_best_answer_for_passage(self, passage,start_probs, end_probs, passage_len=None):
         # reviewed
         """
         Finds the best answer with the maximum start_prob * end_prob from a single passage
         """
+        chinese_punctuation = ['。', '，', '；', '：', '？', '《', '》', '!', '"', '、', '【', '】']
         if passage_len is None:
             passage_len = len(start_probs)
         else:
             passage_len = min(len(start_probs), passage_len)
         best_start, best_end, max_prob = -1, -1, 0
         for start_idx in range(passage_len):
+            if passage['passage_tokens'][start_idx] in chinese_punctuation:
+                continue
+            if passage['passage_tokens'][start_idx] in punctuation:
+                continue
             for ans_len in range(self.max_a_len):
                 end_idx = start_idx + ans_len
                 if end_idx >= passage_len:
